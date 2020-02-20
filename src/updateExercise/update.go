@@ -1,4 +1,4 @@
-package create
+package update
 
 import (
 	"database/sql"
@@ -6,21 +6,28 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
+
+	"github.com/gorilla/mux"
 )
 
 // ExerciseType Type of the Exercise
 type ExerciseType string
 
 var (
-	// ErrMissingUserID Error when userId field is not received
-	ErrMissingUserID = errors.New("Missing userId")
+	// ErrInvalidID Error when ID field is not valid
+	ErrInvalidID = errors.New("Invalid exercise id")
+	// ErrMissingID Error when ID field is not received
+	ErrMissingID = errors.New("Missing exercise id")
+	// ErrUnwantedUserID Error when userId field is received
+	ErrUnwantedUserID = errors.New("Unwanted userId field received")
 	// ErrMissingDescription Error when description field is not received
 	ErrMissingDescription = errors.New("Missing description")
 	// ErrInvalidDescription Error when description field is not received
 	ErrInvalidDescription = errors.New("Invalid description not an alphanumeric string")
-	// ErrMissingType Error when type field is not received
-	ErrMissingType = errors.New("Missing type")
+	// ErrUnwantedType Error when type field is received
+	ErrUnwantedType = errors.New("Unwanted type field received")
 	// ErrInvalidType Error when type field is invalid
 	ErrInvalidType = errors.New("Invalid type")
 	// ErrMissingStartTime Error when startTime field is not received
@@ -35,37 +42,14 @@ var (
 	ErrInvalidExercise = errors.New("Invalid exercise as to total points calculation equals 0")
 	// ErrExerciseOverlapping Error when a new exercise overlaps a saved one
 	ErrExerciseOverlapping = errors.New("The exercise that you intended to create overlaps with an existing one")
-
-	validTypes = map[ExerciseType]bool{
-		RunningType:          true,
-		SwimmingType:         true,
-		StrenghtTrainingType: true,
-		CircuitTrainingType:  true,
-	}
-
-	getMultiplicationFactor = map[ExerciseType]int{
-		RunningType:          2,
-		SwimmingType:         3,
-		StrenghtTrainingType: 3,
-		CircuitTrainingType:  4,
-	}
-)
-
-const (
-	// RunningType Exercise type for running
-	RunningType ExerciseType = "RUNNING"
-	// SwimmingType Exercise type for swimming
-	SwimmingType ExerciseType = "SWIMMING"
-	// StrenghtTrainingType Exercise type for strength training
-	StrenghtTrainingType ExerciseType = "STRENGTH_TRAINING"
-	// CircuitTrainingType Exercise type for circuit training
-	CircuitTrainingType ExerciseType = "CIRCUIT_TRAINING"
+	// ErrDatabaseError internal database error
+	ErrDatabaseError = errors.New("Internal database error")
+	// ErrNoExerciseFound The exercise you tried to update does not exists
+	ErrNoExerciseFound = errors.New("The exercise you tried to update does not exists")
 )
 
 // Exercise structure and Request structure
 type Exercise struct {
-	// ID field of Exercise
-	ID int64 `json:"id"`
 	// UserID id field of User
 	UserID int64 `json:"userId"`
 	// Description of the Exercise
@@ -98,14 +82,14 @@ func addDurationToDate(date time.Time, duration int64) time.Time {
 	return afterDurationSeconds
 }
 
-func checkExerciseOverlapping(userID int64, startDate time.Time, finishDate time.Time) bool {
+func checkExerciseOverlapping(ID int64, userID int64, startDate time.Time, finishDate time.Time) bool {
 	var totalExercisesCollatingOnStart int
 	var totalExercisesCollatingOnFinish int
 	database, _ := sql.Open("sqlite3", "../egym.db")
-	sqlStatement := `SELECT COUNT(*) FROM exercises WHERE USER_ID=$1 AND START_TIME BETWEEN $2 AND $3;`
-	_ = database.QueryRow(sqlStatement, userID, startDate, finishDate).Scan(&totalExercisesCollatingOnStart)
-	sqlStatement = `SELECT COUNT(*) FROM exercises WHERE USER_ID=$1 AND FINISH_TIME BETWEEN $2 AND $3;`
-	_ = database.QueryRow(sqlStatement, userID, startDate, finishDate).Scan(&totalExercisesCollatingOnFinish)
+	sqlStatement := `SELECT COUNT(*) FROM exercises WHERE USER_ID=$1 AND ID!=$2 AND START_TIME BETWEEN $3 AND $4;`
+	_ = database.QueryRow(sqlStatement, userID, ID, startDate, finishDate).Scan(&totalExercisesCollatingOnStart)
+	sqlStatement = `SELECT COUNT(*) FROM exercises WHERE USER_ID=$1 AND ID!=$2 AND FINISH_TIME BETWEEN $3 AND $4;`
+	_ = database.QueryRow(sqlStatement, userID, ID, startDate, finishDate).Scan(&totalExercisesCollatingOnFinish)
 
 	if totalExercisesCollatingOnStart > 0 || totalExercisesCollatingOnFinish > 0 {
 		return true
@@ -114,10 +98,14 @@ func checkExerciseOverlapping(userID int64, startDate time.Time, finishDate time
 	return false
 }
 
-func (e *Exercise) validateCreateExerciseRequest() error {
+func (e *Exercise) validateUpdateExerciseRequest(ID int64) error {
 
-	if e.UserID == 0 {
-		return ErrMissingUserID
+	if ID == 0 {
+		return ErrMissingID
+	}
+
+	if e.UserID != 0 {
+		return ErrUnwantedUserID
 	}
 
 	if e.Description == "" {
@@ -128,12 +116,8 @@ func (e *Exercise) validateCreateExerciseRequest() error {
 		return ErrInvalidDescription
 	}
 
-	if e.ExerciseType == "" {
-		return ErrMissingType
-	}
-
-	if !validTypes[e.ExerciseType] {
-		return ErrInvalidType
+	if e.ExerciseType != "" {
+		return ErrUnwantedType
 	}
 
 	if e.StartTime.IsZero() {
@@ -149,7 +133,7 @@ func (e *Exercise) validateCreateExerciseRequest() error {
 	}
 
 	finishDate := addDurationToDate(e.StartTime, e.Duration)
-	isOverlapping := checkExerciseOverlapping(e.UserID, e.StartTime, finishDate)
+	isOverlapping := checkExerciseOverlapping(ID, e.UserID, e.StartTime, finishDate)
 	if isOverlapping {
 		return ErrExerciseOverlapping
 	}
@@ -157,36 +141,40 @@ func (e *Exercise) validateCreateExerciseRequest() error {
 	return nil
 }
 
-func (e *Exercise) calculatePoints() int64 {
-	multiplicationFactor := getMultiplicationFactor[e.ExerciseType]
-	basePoints := (int64((e.Duration+59)/60) + e.Calories) * int64(multiplicationFactor)
-	sqlStatement := `SELECT COUNT(*) FROM exercises WHERE TYPE=$1 AND USER_ID=$2 AND START_TIME BETWEEN DATE("NOW", "-29 days") AND DATE("NOW", "-1 day");`
-	database, _ := sql.Open("sqlite3", "../egym.db")
-	var numberOfTimesExecutedExercise int
-	_ = database.QueryRow(sqlStatement, e.ExerciseType, e.UserID).Scan(&numberOfTimesExecutedExercise)
-	percent := 100.0
-	for i := 1; i < numberOfTimesExecutedExercise; i++ {
-		percent -= 10.0
-	}
-	return int64(float64(basePoints) * (percent / 100.0))
-}
-
-func (e *Exercise) createExercise() error {
-	points := e.calculatePoints()
-	if points <= 0 {
-		return ErrInvalidExercise
-	}
+func (e *Exercise) updateExercise(ID int64) error {
 	finishDate := addDurationToDate(e.StartTime, e.Duration)
 	database, err := sql.Open("sqlite3", "../egym.db")
-	statement, err := database.Prepare("INSERT INTO exercises (USER_ID, DESCRIPTION, TYPE, START_TIME, FINISH_TIME, DURATION, CALORIES, POINTS) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-	result, err := statement.Exec(e.UserID, e.Description, e.ExerciseType, e.StartTime, finishDate, e.Duration, e.Calories, points)
-	e.ID, err = result.LastInsertId()
+	if err != nil {
+		return ErrDatabaseError
+	}
+	sqlStatement := `SELECT COUNT(*) exercises WHERE ID=$1;`
+	var numberOfElements int64
+	_ = database.QueryRow(sqlStatement, ID).Scan(&numberOfElements)
+	if err != nil {
+		return ErrDatabaseError
+	}
+	if numberOfElements == 0 {
+		return ErrNoExerciseFound
+	}
+	statement, err := database.Prepare("UPDATE exercises SET DESCRIPTION=$1, START_TIME=$2, FINISH_TIME=$3, DURATION=$4, CALORIES=$5 WHERE ID=$6")
+	if err != nil {
+		return ErrDatabaseError
+	}
+	_, err = statement.Exec(e.Description, e.StartTime, finishDate, e.Duration, e.Calories, ID)
+
+	sqlStatement = `SELECT USER_ID, TYPE FROM exercises WHERE ID=$1;`
+	var userID int64
+	var exerciseType ExerciseType
+	_ = database.QueryRow(sqlStatement, ID).Scan(&userID, &exerciseType)
+	e.UserID = userID
+	e.ExerciseType = exerciseType
 	return err
 }
 
-// ExerciseEndpoint function that handles request and response
-func ExerciseEndpoint(w http.ResponseWriter, r *http.Request) {
+// UpdateExerciseEndpoint function that handles request and response
+func UpdateExerciseEndpoint(w http.ResponseWriter, r *http.Request) {
 	exercise := &Exercise{}
+	params := mux.Vars(r)
 	defer r.Body.Close()
 	response := &Reponse{
 		Error: "",
@@ -198,9 +186,18 @@ func ExerciseEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	exerciseID, err := strconv.ParseInt(params["exerciseId"], 10, 64)
+
+	if err != nil {
+		response.Error = ErrInvalidID.Error()
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 
-	err := exercise.validateCreateExerciseRequest()
+	err = exercise.validateUpdateExerciseRequest(exerciseID)
 	if err != nil {
 		response.Error = err.Error()
 		w.WriteHeader(http.StatusBadRequest)
@@ -208,14 +205,14 @@ func ExerciseEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = exercise.createExercise()
+	err = exercise.updateExercise(exerciseID)
 	if err != nil {
 		response.Error = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(response)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
+	w.WriteHeader(http.StatusOK)
 	response.Exercise = exercise
 	json.NewEncoder(w).Encode(response)
 }
