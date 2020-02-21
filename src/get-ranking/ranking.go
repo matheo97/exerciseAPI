@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"time"
 )
@@ -68,8 +69,8 @@ type User struct {
 
 // Response for /exercise
 type Response struct {
-	Ranking []*User `json:"ranking"` // use struct []*User inside []*PointsByType
-	Error   string  `json:"error"`
+	Ranking []*User `json:"ranking,omitempty"` // use struct []*User inside []*PointsByType
+	Error   string  `json:"error,omitempty"`
 }
 
 // ByPoints implements sort.Interface based on the points field
@@ -164,20 +165,22 @@ func setResult(result *sql.Rows) ([]Row, error) {
 }
 
 func getExercisesByType(exerciseType ExerciseType, userID string) ([]Row, error) {
-	database, err := sql.Open("sqlite3", "../egym.db")
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	database, err := sql.Open("sqlite3", fmt.Sprintf("%s/egym.db", dir))
 	if err != nil {
 		return nil, err
 	}
 
 	query := fmt.Sprintf(`%s%s%s%s%s`, `SELECT TYPE, DURATION, CALORIES, FINISH_TIME FROM exercises WHERE TYPE="`, exerciseType, `" AND USER_ID=`, userID, ` AND START_TIME BETWEEN DATE("NOW", "-29 days") AND DATE("NOW", "-1 day") ORDER BY START_TIME DESC`)
-
 	result, err := database.Query(query)
 	if err != nil {
 		return nil, err
 	}
 
 	userExercises, err := setResult(result)
-
 	return userExercises, nil
 }
 

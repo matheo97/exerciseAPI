@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"time"
 )
@@ -73,8 +75,8 @@ type Exercise struct {
 
 // Response for /exercise
 type Response struct {
-	Exercise *Exercise `json:"exercise"`
-	Error    string    `json:"error"`
+	Exercise *Exercise `json:"exercise,omitempty"`
+	Error    string    `json:"error,omitempty"`
 }
 
 func isAlphaNumericString(description string) bool {
@@ -93,7 +95,11 @@ func checkExerciseOverlapping(userID int64, startDate time.Time, finishDate time
 	var totalExercisesCollatingOnStart int
 	var totalExercisesCollatingOnFinish int
 
-	database, err := sql.Open("sqlite3", "../egym.db")
+	dir, err := os.Getwd()
+	if err != nil {
+		return false, err
+	}
+	database, err := sql.Open("sqlite3", fmt.Sprintf("%s/egym.db", dir))
 	if err != nil {
 		return true, err
 	}
@@ -155,7 +161,11 @@ func (e *Exercise) validateCreateExerciseRequest() error {
 
 func (e *Exercise) createExercise() error {
 	finishDate := addDurationToDate(e.StartTime, e.Duration) // esto podria estar siendo redundante
-	database, err := sql.Open("sqlite3", "../egym.db")
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	database, err := sql.Open("sqlite3", fmt.Sprintf("%s/egym.db", dir))
 	if err != nil {
 		return err
 	}

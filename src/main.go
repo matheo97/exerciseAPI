@@ -2,8 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	create "./create-exercise"
 	rank "./get-ranking"
@@ -14,7 +16,11 @@ import (
 )
 
 func createTable() error {
-	database, err := sql.Open("sqlite3", "../egym.db")
+	dir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	database, err := sql.Open("sqlite3", fmt.Sprintf("%s/egym.db", dir))
 	if err != nil {
 		return err
 	}
