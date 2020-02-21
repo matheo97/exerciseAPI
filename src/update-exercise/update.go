@@ -64,8 +64,8 @@ type Exercise struct {
 	Calories int64 `json:"calories"`
 }
 
-//Reponse for /exercise
-type Reponse struct {
+// Response for /exercise
+type Response struct {
 	Exercise *Exercise `json:"exercise"`
 	Error    string    `json:"error"`
 }
@@ -82,24 +82,29 @@ func addDurationToDate(date time.Time, duration int64) time.Time {
 	return afterDurationSeconds
 }
 
-func checkExerciseOverlapping(ID int64, userID int64, startDate time.Time, finishDate time.Time) bool {
+func checkExerciseOverlapping(userID int64, startDate time.Time, finishDate time.Time) (bool, error) {
 	var totalExercisesCollatingOnStart int
 	var totalExercisesCollatingOnFinish int
-	database, _ := sql.Open("sqlite3", "../egym.db")
-	sqlStatement := `SELECT COUNT(*) FROM exercises WHERE USER_ID=$1 AND ID!=$2 AND START_TIME BETWEEN $3 AND $4;`
-	_ = database.QueryRow(sqlStatement, userID, ID, startDate, finishDate).Scan(&totalExercisesCollatingOnStart)
-	sqlStatement = `SELECT COUNT(*) FROM exercises WHERE USER_ID=$1 AND ID!=$2 AND FINISH_TIME BETWEEN $3 AND $4;`
-	_ = database.QueryRow(sqlStatement, userID, ID, startDate, finishDate).Scan(&totalExercisesCollatingOnFinish)
 
-	if totalExercisesCollatingOnStart > 0 || totalExercisesCollatingOnFinish > 0 {
-		return true
+	database, err := sql.Open("sqlite3", "../egym.db")
+	if err != nil {
+		return true, err
 	}
 
-	return false
+	sqlStatement := `SELECT COUNT(*) FROM exercises WHERE USER_ID=$1 AND START_TIME BETWEEN $2 AND $3;`
+	_ = database.QueryRow(sqlStatement, userID, startDate, finishDate).Scan(&totalExercisesCollatingOnStart)
+
+	sqlStatement = `SELECT COUNT(*) FROM exercises WHERE USER_ID=$1 AND FINISH_TIME BETWEEN $2 AND $3;`
+	_ = database.QueryRow(sqlStatement, userID, startDate, finishDate).Scan(&totalExercisesCollatingOnFinish)
+
+	if totalExercisesCollatingOnStart > 0 || totalExercisesCollatingOnFinish > 0 {
+		return true, ErrExerciseOverlapping
+	}
+
+	return false, nil
 }
 
 func (e *Exercise) validateUpdateExerciseRequest(ID int64) error {
-
 	if ID == 0 {
 		return ErrMissingID
 	}
@@ -133,9 +138,9 @@ func (e *Exercise) validateUpdateExerciseRequest(ID int64) error {
 	}
 
 	finishDate := addDurationToDate(e.StartTime, e.Duration)
-	isOverlapping := checkExerciseOverlapping(ID, e.UserID, e.StartTime, finishDate)
+	isOverlapping, err := checkExerciseOverlapping(e.UserID, e.StartTime, finishDate)
 	if isOverlapping {
-		return ErrExerciseOverlapping
+		return err
 	}
 
 	return nil
@@ -143,76 +148,78 @@ func (e *Exercise) validateUpdateExerciseRequest(ID int64) error {
 
 func (e *Exercise) updateExercise(ID int64) error {
 	finishDate := addDurationToDate(e.StartTime, e.Duration)
+
 	database, err := sql.Open("sqlite3", "../egym.db")
 	if err != nil {
 		return ErrDatabaseError
 	}
+
 	sqlStatement := `SELECT COUNT(*) exercises WHERE ID=$1;`
 	var numberOfElements int64
 	_ = database.QueryRow(sqlStatement, ID).Scan(&numberOfElements)
-	if err != nil {
-		return ErrDatabaseError
-	}
 	if numberOfElements == 0 {
 		return ErrNoExerciseFound
 	}
+
 	statement, err := database.Prepare("UPDATE exercises SET DESCRIPTION=$1, START_TIME=$2, FINISH_TIME=$3, DURATION=$4, CALORIES=$5 WHERE ID=$6")
 	if err != nil {
 		return ErrDatabaseError
 	}
+
 	_, err = statement.Exec(e.Description, e.StartTime, finishDate, e.Duration, e.Calories, ID)
 
 	sqlStatement = `SELECT USER_ID, TYPE FROM exercises WHERE ID=$1;`
 	var userID int64
 	var exerciseType ExerciseType
+
 	_ = database.QueryRow(sqlStatement, ID).Scan(&userID, &exerciseType)
 	e.UserID = userID
 	e.ExerciseType = exerciseType
+
 	return err
 }
 
-// UpdateExerciseEndpoint function that handles request and response
-func UpdateExerciseEndpoint(w http.ResponseWriter, r *http.Request) {
-	exercise := &Exercise{}
-	params := mux.Vars(r)
-	defer r.Body.Close()
-	response := &Reponse{
-		Error: "",
-	}
-	if err := json.NewDecoder(r.Body).Decode(exercise); err != nil {
+func response(w http.ResponseWriter, httpStatus int, response *Response, err error) {
+	if err != nil {
 		response.Error = err.Error()
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(response)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpStatus)
+	json.NewEncoder(w).Encode(response)
+}
+
+// ExerciseEndpoint function that handles request and response
+func ExerciseEndpoint(w http.ResponseWriter, r *http.Request) {
+	exercise := &Exercise{}
+	newResponse := &Response{}
+	params := mux.Vars(r)
+
+	defer r.Body.Close()
+
+	if err := json.NewDecoder(r.Body).Decode(exercise); err != nil {
+		response(w, http.StatusBadRequest, newResponse, err)
 		return
 	}
 
 	exerciseID, err := strconv.ParseInt(params["exerciseId"], 10, 64)
-
 	if err != nil {
-		response.Error = ErrInvalidID.Error()
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(response)
+		response(w, http.StatusBadRequest, newResponse, err)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-
 	err = exercise.validateUpdateExerciseRequest(exerciseID)
 	if err != nil {
-		response.Error = err.Error()
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(response)
+		response(w, http.StatusBadRequest, newResponse, err)
 		return
 	}
 
 	err = exercise.updateExercise(exerciseID)
 	if err != nil {
-		response.Error = err.Error()
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(response)
+		response(w, http.StatusInternalServerError, newResponse, err)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	response.Exercise = exercise
-	json.NewEncoder(w).Encode(response)
+
+	newResponse.Exercise = exercise
+	response(w, http.StatusOK, newResponse, err)
 }
